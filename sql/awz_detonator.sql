@@ -1,0 +1,6 @@
+CREATE TABLE IF NOT EXISTS `awz_detonator_blast_props` (
+  `prop_id` VARCHAR(80) NOT NULL,
+  `destroyed` TINYINT(1) NOT NULL DEFAULT 0,
+  `destroyed_at` TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`prop_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
