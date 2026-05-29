@@ -567,11 +567,3 @@ awz_detonator/
 ├── sql/SQL.sql
 └── stream/new_com_03_strm_0.ymap
 ```
-
-## License
-
-Use, edit and adapt this resource according to the license included with your release.
-
-## Credits
-
-Developed by AWZ Code for the RedM/VORP community.
