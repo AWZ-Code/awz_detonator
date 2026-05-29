@@ -11,9 +11,17 @@ local State = {
     rope = nil,
     prompts = {},
     group = GetRandomIntInRange(0, 0xffffff),
-    blastProps = {},
-    blastDestroyed = {},
-    bacchusGhostTrain = nil,
+    destructibleProps = {},
+    destructibleDestroyed = {},
+    railBlockerTrain = nil,
+    breachedVaultWalls = {},
+    vaultBreachObjects = {},
+    vaultBreachFx = {},
+    rhodesImapsDestroyedApplied = false,
+
+    crouchWalkActive = false,
+    crouchWalkToken = 0,
+    crouchWalkLastSupportAt = 0,
 }
 
 local function dbg(msg)
@@ -29,10 +37,6 @@ local function notify(msg, customDuration)
     local text = tostring(msg or ' ')
     if text == '' then text = ' ' end
 
-    -- AWZ Bottom must be called through its event only.
-    -- Direct exports.awz_libs:ShowBottom from this resource can trigger a
-    -- CreateVarString native exception on some RedM builds, especially when
-    -- the same notification is already being fired by awz_libs.
     if Config.Notify and Config.Notify.useAwzLibs and Config.Notify.awzEvent then
         TriggerEvent(Config.Notify.awzEvent, text, duration)
         return
@@ -45,7 +49,7 @@ local function notify(msg, customDuration)
     end
 end
 
-RegisterNetEvent('awz_dynamite:client:notify', notify)
+RegisterNetEvent('awz_detonator:client:notify', notify)
 
 local function vdist(a, b)
     local dx, dy, dz = a.x - b.x, a.y - b.y, a.z - b.z
@@ -106,6 +110,179 @@ local function playAnim(ped, dict, anim, duration, flag)
     return false
 end
 
+local function getMovementConfig()
+    local cfg = Config.WireMovement or {}
+    return {
+        enabled = cfg.enabled ~= false,
+        crouch = cfg.crouch ~= false,
+        minerWalk = cfg.minerWalk ~= false,
+        maxMoveRate = tonumber(cfg.maxMoveRate or 0.55) or 0.55,
+        supportInterval = tonumber(cfg.supportInterval or 1400) or 1400,
+        blockRun = cfg.blockRun ~= false,
+        forceDuckControl = cfg.forceDuckControl ~= false,
+        duckControl = tonumber(cfg.duckControl or 0xDB096B85) or 0xDB096B85,
+
+        disableMinerWalkWhenCrouched = cfg.disableMinerWalkWhenCrouched ~= false,
+    }
+end
+
+local function getPedCrouchMovement(ped)
+    local ok, result = pcall(function()
+        return Citizen.InvokeNative(0xD5FE956C70FF370B, ped)
+    end)
+    return ok and result == true
+end
+
+local function setPedCrouchMovement(ped, state, immediately)
+    pcall(function()
+        Citizen.InvokeNative(0x7DE9692C6F64CFE8, ped, state and true or false, immediately ~= false)
+    end)
+end
+
+local function forceNativeDuckThisFrame(ped)
+    local cfg = getMovementConfig()
+    if not cfg.enabled or not cfg.crouch then return end
+
+    if cfg.forceDuckControl then
+        pcall(function() SetControlNormal(0, cfg.duckControl or 0xDB096B85, 1.0) end)
+    end
+    setPedCrouchMovement(ped, true, true)
+end
+
+local function shouldUseMinerWireWalk(cfg)
+    return cfg.enabled and cfg.minerWalk and not (cfg.crouch and cfg.disableMinerWalkWhenCrouched)
+end
+
+local function applyMinerWireWalk(ped, forceUpdate)
+    local cfg = getMovementConfig()
+    if not shouldUseMinerWireWalk(cfg) then return end
+
+    pcall(function() Citizen.InvokeNative(-7911272635667285042, ped, 'arthur_healthy') end)
+    pcall(function() Citizen.InvokeNative(-8505637587031116644, ped, 'carry_pitchfork') end)
+    pcall(function() Citizen.InvokeNative(2452284214444829210, ped, true, true) end)
+    pcall(function() Citizen.InvokeNative(4201987302474811675, ped, 'PITCH_FORKS') end)
+
+    if forceUpdate then
+        pcall(function() ForceEntityAiAndAnimationUpdate(ped, true) end)
+    end
+end
+
+local function maintainMinerWireWalk(ped)
+    local cfg = getMovementConfig()
+    if not shouldUseMinerWireWalk(cfg) then return end
+
+    pcall(function() Citizen.InvokeNative(-8505637587031116644, ped, 'carry_pitchfork') end)
+
+    local now = GetGameTimer()
+    if now - (State.crouchWalkLastSupportAt or 0) >= cfg.supportInterval then
+        State.crouchWalkLastSupportAt = now
+        pcall(function() Citizen.InvokeNative(2452284214444829210, ped, true, true) end)
+        pcall(function() Citizen.InvokeNative(4201987302474811675, ped, 'PITCH_FORKS') end)
+    end
+end
+
+local function blockWireRunControls(ped)
+    local cfg = getMovementConfig()
+    if not cfg.enabled or not cfg.blockRun then return end
+
+    DisableControlAction(0, 0x8FFC75D6, true)
+    DisableControlAction(0, 0xAC4BD4F1, true)
+    DisableControlAction(0, 0xD9D0E1C0, true)
+
+    pcall(function() SetPedMoveRateOverride(ped, cfg.maxMoveRate or 0.55) end)
+    pcall(function() SetPedMaxMoveBlendRatio(ped, cfg.maxMoveRate or 0.55) end)
+    pcall(function() SetPedDesiredMoveBlendRatio(ped, cfg.maxMoveRate or 0.55) end)
+end
+
+local function resetWireWalk(ped, clearTasks, reason)
+    local cfg = getMovementConfig()
+    ped = ped or PlayerPedId()
+    if not ped or not DoesEntityExist(ped) then return end
+
+    if cfg.crouch then
+
+        setPedCrouchMovement(ped, false, true)
+    end
+
+    if cfg.minerWalk then
+
+        pcall(function() Citizen.InvokeNative(0x58F7DB5BD8FA2288, ped) end)
+        pcall(function() Citizen.InvokeNative(0x4FD80C3DD84B817B, ped) end)
+        pcall(function() Citizen.InvokeNative(0x6A2F820452017EA2) end)
+    end
+
+    pcall(function() SetPedMoveRateOverride(ped, 1.0) end)
+
+    if clearTasks then
+        ClearPedSecondaryTask(ped)
+        ClearPedTasks(ped)
+    end
+
+    pcall(function() ForceEntityAiAndAnimationUpdate(ped, true) end)
+end
+
+local function stopWireWalk(reason)
+    if not State.crouchWalkActive then return end
+
+    State.crouchWalkActive = false
+    State.crouchWalkToken = (State.crouchWalkToken or 0) + 1
+    local token = State.crouchWalkToken
+    resetWireWalk(PlayerPedId(), false, reason or 'stop')
+
+    CreateThread(function()
+        Wait(250)
+        if token ~= State.crouchWalkToken or State.crouchWalkActive then return end
+        resetWireWalk(PlayerPedId(), false, 'delayed_250')
+
+        Wait(650)
+        if token ~= State.crouchWalkToken or State.crouchWalkActive then return end
+        resetWireWalk(PlayerPedId(), false, 'delayed_900')
+    end)
+end
+
+local function startWireWalk()
+    local cfg = getMovementConfig()
+    if not cfg.enabled then return end
+
+    State.crouchWalkToken = (State.crouchWalkToken or 0) + 1
+    local token = State.crouchWalkToken
+    State.crouchWalkActive = true
+    State.crouchWalkLastSupportAt = 0
+
+    local ped = PlayerPedId()
+    applyMinerWireWalk(ped, true)
+    if cfg.crouch then
+        forceNativeDuckThisFrame(ped)
+        Wait(0)
+        forceNativeDuckThisFrame(ped)
+    end
+
+    CreateThread(function()
+        while State.crouchWalkActive and token == State.crouchWalkToken do
+            local loopPed = PlayerPedId()
+            if DoesEntityExist(loopPed) and not IsPedDeadOrDying(loopPed, true) then
+                maintainMinerWireWalk(loopPed)
+                blockWireRunControls(loopPed)
+
+                if cfg.crouch then
+
+                    forceNativeDuckThisFrame(loopPed)
+                end
+
+                if cfg.maxMoveRate and cfg.maxMoveRate > 0.0 and cfg.maxMoveRate < 1.15 then
+                    pcall(function() SetPedMoveRateOverride(loopPed, cfg.maxMoveRate) end)
+                    pcall(function() SetPedMaxMoveBlendRatio(loopPed, cfg.maxMoveRate) end)
+                    pcall(function() SetPedDesiredMoveBlendRatio(loopPed, cfg.maxMoveRate) end)
+                end
+            else
+                stopWireWalk('ped_dead_or_missing')
+                break
+            end
+            Wait(0)
+        end
+    end)
+end
+
 local function makePrompt(key, text)
     local prompt = PromptRegisterBegin()
     PromptSetControlAction(prompt, key)
@@ -144,6 +321,7 @@ end
 
 local function cleanup(keepDynamite)
     local ped = PlayerPedId()
+    stopWireWalk('cleanup')
     ClearPedTasks(ped)
     FreezeEntityPosition(ped, false)
 
@@ -170,7 +348,7 @@ end
 
 local function refundAndStop(message)
     cleanup(false)
-    TriggerServerEvent('awz_dynamite:server:refund')
+    TriggerServerEvent('awz_detonator:server:refund')
     if message then notify(message) end
 end
 
@@ -238,7 +416,7 @@ local function placeDynamite(standing)
     return true
 end
 
-local function startFuseStage()
+local function startWireStage()
     local ped = PlayerPedId()
     local coords = GetEntityCoords(ped)
 
@@ -249,7 +427,8 @@ local function startFuseStage()
         createRopeBetween(State.spool, State.dynamite)
     end
 
-    State.stage = 'fuse'
+    State.stage = 'wire'
+    startWireWalk()
 end
 
 local function placeDetonator()
@@ -303,24 +482,29 @@ local function explode()
 
     State.stage = 'exploding'
     Wait(850)
-    TriggerServerEvent('awz_dynamite:server:detonate', { x = coords.x, y = coords.y, z = coords.z })
+    TriggerServerEvent('awz_detonator:server:detonate', { x = coords.x, y = coords.y, z = coords.z })
 end
 
-RegisterNetEvent('awz_dynamite:client:doExplosion', function(coords)
+local function handleLocalExplosion(coords)
     if not coords then return end
 
     AddExplosion(coords.x, coords.y, coords.z, Config.ExplosionType or 26, Config.RangeDamage or 5.0, true, false, Config.CameraShake or 2.0)
+    stopWireWalk('exploded')
     notify(Config.Language.exploded)
 
     deleteEntity(State.dynamite)
     State.dynamite = nil
     Wait(1800)
     cleanup(false)
-end)
+end
 
-RegisterNetEvent('awz_dynamite:client:stopPlacement', function()
+RegisterNetEvent('awz_detonator:client:doExplosion', handleLocalExplosion)
+
+local function handleStopPlacement()
     cleanup(false)
-end)
+end
+
+RegisterNetEvent('awz_detonator:client:stopPlacement', handleStopPlacement)
 
 local function getServerId()
     return GetPlayerServerId(PlayerId())
@@ -332,26 +516,24 @@ RegisterNetEvent('awz_detonator:client:worldExplosion', function(coords, ownerSe
     AddExplosion(coords.x, coords.y, coords.z, Config.ExplosionType or 26, Config.RangeDamage or 5.0, true, false, Config.CameraShake or 2.0)
 end)
 
-
-
 local function loadTrainCars(trainHash)
     if not trainHash or trainHash == 0 then return false end
 
-    local cars = Citizen.InvokeNative(0x635423D55CA84FC8, trainHash) -- GetNumCarsFromTrainConfig
+    local cars = Citizen.InvokeNative(0x635423D55CA84FC8, trainHash)
     if not cars or cars == 0 then
-        dbg(('invalid train config for Bacchus ghost train: %s'):format(tostring(trainHash)))
+        dbg(('invalid train config for rail blocker train: %s'):format(tostring(trainHash)))
         return false
     end
 
     for index = 0, cars - 1 do
-        local model = Citizen.InvokeNative(0x8DF5F6A19F99F0D5, trainHash, index) -- GetTrainModelFromTrainConfigByCarIndex
+        local model = Citizen.InvokeNative(0x8DF5F6A19F99F0D5, trainHash, index)
         if model and model ~= 0 then
             RequestModel(model)
             local timeout = GetGameTimer() + 5000
             while not HasModelLoaded(model) do
                 Wait(10)
                 if GetGameTimer() > timeout then
-                    dbg(('timeout loading Bacchus ghost train car model: %s'):format(tostring(model)))
+                    dbg(('timeout loading rail blocker train car model: %s'):format(tostring(model)))
                     return false
                 end
             end
@@ -361,24 +543,24 @@ local function loadTrainCars(trainHash)
     return true
 end
 
-local function deleteBacchusGhostTrain()
-    local train = State.bacchusGhostTrain
+local function deleteRailBlockerTrain()
+    local train = State.railBlockerTrain
     if train and train ~= 0 and DoesEntityExist(train) then
         SetEntityAsMissionEntity(train, true, true)
         pcall(function() DeleteVehicle(train) end)
         pcall(function() DeleteEntity(train) end)
     end
-    State.bacchusGhostTrain = nil
+    State.railBlockerTrain = nil
 end
 
-local function spawnBacchusGhostTrain()
-    local cfg = Config.BacchusBridge and Config.BacchusBridge.ghostTrain
+local function spawnRailBlockerTrain()
+    local cfg = Config.RailBridgeCollapse and Config.RailBridgeCollapse.blockerTrain
     if not (cfg and cfg.enabled) then
-        deleteBacchusGhostTrain()
+        deleteRailBlockerTrain()
         return
     end
 
-    if State.bacchusGhostTrain and State.bacchusGhostTrain ~= 0 and DoesEntityExist(State.bacchusGhostTrain) then
+    if State.railBlockerTrain and State.railBlockerTrain ~= 0 and DoesEntityExist(State.railBlockerTrain) then
         return
     end
 
@@ -386,16 +568,16 @@ local function spawnBacchusGhostTrain()
     if not loadTrainCars(trainHash) then return end
 
     local c = cfg.coords or vector3(499.69, 1768.78, 188.77)
-    local train = Citizen.InvokeNative(0xC239DBD9A57D2A71, trainHash, c.x, c.y, c.z, false, false, true, false) -- CreateMissionTrain
+    local train = Citizen.InvokeNative(0xC239DBD9A57D2A71, trainHash, c.x, c.y, c.z, false, false, true, false)
     if train and train ~= 0 then
-        State.bacchusGhostTrain = train
-        Citizen.InvokeNative(0xDFBA6BBFF7CCAFBB, train, 0.0) -- SetTrainSpeed
-        Citizen.InvokeNative(0x01021EB2E96B793C, train, 0.0) -- SetTrainCruiseSpeed
+        State.railBlockerTrain = train
+        Citizen.InvokeNative(0xDFBA6BBFF7CCAFBB, train, 0.0)
+        Citizen.InvokeNative(0x01021EB2E96B793C, train, 0.0)
     end
 end
 
-RegisterNetEvent('awz_detonator:client:bacchusBridgeFall', function()
-    local cfg = Config.BacchusBridge
+RegisterNetEvent('awz_detonator:client:railBridgeCollapse', function()
+    local cfg = Config.RailBridgeCollapse
     if not (cfg and cfg.enabled) then return end
 
     local rayfireName = cfg.rayfireObject or 'des_trn3_bridge'
@@ -423,14 +605,367 @@ RegisterNetEvent('awz_detonator:client:bacchusBridgeFall', function()
     end
 
     Wait(1000)
-    spawnBacchusGhostTrain()
+    spawnRailBlockerTrain()
 end)
 
+local function getVaultBreachConfig(id)
+    local cfg = Config.VaultBreaches
+    if not (cfg and cfg.banks) then return nil end
+    for _, bank in ipairs(cfg.banks) do
+        if bank.id == id then return bank end
+    end
+    return nil
+end
 
-local function getBlastPropCoords(entry)
+local function cleanupVaultBreachObjects(id)
+    local objects = State.vaultBreachObjects[id]
+    if type(objects) == 'table' then
+        for _, ent in pairs(objects) do
+            deleteEntity(ent)
+        end
+    end
+    State.vaultBreachObjects[id] = {}
+end
+
+local function stopVaultBreachFx(id)
+    local fxList = State.vaultBreachFx[id]
+    if type(fxList) == 'table' then
+        for _, fx in ipairs(fxList) do
+            if fx then
+                pcall(function()
+                    Citizen.InvokeNative(0x459598F579C98929, fx, false)
+                end)
+            end
+        end
+    end
+    State.vaultBreachFx[id] = {}
+end
+
+local function requestPtfxAsset(asset)
+    if not asset or asset == '' then return false end
+    local hash = GetHashKey(asset)
+
+    if Citizen.InvokeNative(0x65BB72F29138F5D6, hash) then
+        return true
+    end
+
+    Citizen.InvokeNative(-958645240002163057, hash)
+
+    local timeout = GetGameTimer() + 5000
+    while not Citizen.InvokeNative(0x65BB72F29138F5D6, hash) do
+        Wait(0)
+        if GetGameTimer() > timeout then
+            dbg(('ptfx asset timeout: %s'):format(tostring(asset)))
+            return false
+        end
+    end
+
+    return true
+end
+
+local function startLoopedPtfx(asset, effect, x, y, z, rx, ry, rz, scale)
+    if not requestPtfxAsset(asset) then return nil end
+
+    Citizen.InvokeNative(-6841618196140335854, asset)
+    return Citizen.InvokeNative(
+        -5029809955846070982,
+        effect,
+        x, y, z,
+        rx or 0.0, ry or 0.0, rz or 0.0,
+        scale or 1.0,
+        0.0, 0.0, 0.0,
+        0, 0, 0
+    )
+end
+
+local function runVaultBreachSmoke(id, effects)
+    stopVaultBreachFx(id)
+
+    local handles = {}
+    for _, fx in ipairs(effects or {}) do
+        local handle = startLoopedPtfx(
+            fx.asset,
+            fx.effect,
+            fx.coords.x, fx.coords.y, fx.coords.z,
+            fx.rotation and fx.rotation.x or 0.0,
+            fx.rotation and fx.rotation.y or 0.0,
+            fx.rotation and fx.rotation.z or 0.0,
+            fx.scale or 1.0
+        )
+        if handle then handles[#handles + 1] = handle end
+        Wait(100)
+    end
+
+    State.vaultBreachFx[id] = handles
+
+    local smokeTime = tonumber((Config.VaultBreaches and Config.VaultBreaches.smokeTime) or 240000) or 240000
+    if smokeTime > 0 and #handles > 0 then
+        CreateThread(function()
+            Wait(smokeTime)
+            stopVaultBreachFx(id)
+        end)
+    end
+end
+
+local function refreshInteriorSafely(interior, forceToggle)
+    pcall(function()
+        if forceToggle then
+            DisableInterior(interior, true)
+            Wait(0)
+            DisableInterior(interior, false)
+        end
+
+        if RefreshInterior then RefreshInterior(interior) end
+    end)
+end
+
+local function activateInteriorEntitySets(interior, interiorName, sets, forceToggle)
+    if not interior or type(sets) ~= 'table' then return end
+
+    for _, setName in ipairs(sets) do
+        pcall(function()
+            ActivateInteriorEntitySet(interior, setName)
+        end)
+    end
+
+    refreshInteriorSafely(interior, forceToggle == true)
+end
+
+local function deactivateInteriorEntitySets(interior, interiorName, sets, forceToggle)
+    if not interior or type(sets) ~= 'table' then return end
+
+    for _, setName in ipairs(sets) do
+        pcall(function()
+            DeactivateInteriorEntitySet(interior, setName)
+        end)
+    end
+
+    refreshInteriorSafely(interior, forceToggle == true)
+end
+
+local function applyRhodesVaultStateDestroyed()
+    local doorHash = 3483244267
+
+    pcall(function()
+        Citizen.InvokeNative(-2769104647502929274, doorHash, 1, 1, 0, 0, 0, 0)
+        Citizen.InvokeNative(7758457796463198035, doorHash, 0)
+    end)
+end
+
+local function applyRhodesVaultImapsBreached(force)
+
+    if State.rhodesImapsDestroyedApplied and force ~= true then return end
+
+    pcall(function() RemoveImap(518127510) end)
+    pcall(function() RemoveImap(828093818) end)
+    pcall(function() RequestImap(758684739) end)
+    pcall(function() RequestImap(1570711119) end)
+    pcall(function() RequestImap(-661825463) end)
+
+    State.rhodesImapsDestroyedApplied = true
+end
+
+local function applyRhodesVaultInteriorBreached(forceToggle)
+
+    activateInteriorEntitySets(29442, 'Rhodes vault', { 'rhobank_int_wallb' }, forceToggle)
+    deactivateInteriorEntitySets(29442, 'Rhodes vault', { 'rhobank_int_walla' }, false)
+    applyRhodesVaultStateDestroyed()
+end
+
+local function applyRhodesVaultBreached(playFx, reapplyOnly)
+    if not reapplyOnly then
+        applyRhodesVaultImapsBreached(false)
+        applyRhodesVaultInteriorBreached(true)
+    else
+
+        applyRhodesVaultInteriorBreached(false)
+    end
+
+    if playFx then
+        AddExplosion(1289.2504882812, -1316.3029785156, 76.542404174804, (Config.VaultBreaches and Config.VaultBreaches.explosionType) or 25, (Config.VaultBreaches and Config.VaultBreaches.explosionDamageScale) or 5.0, true, false, 0)
+        runVaultBreachSmoke('rhodes_bank_wall', {
+            {
+                asset = 'scr_odr1',
+                effect = 'scr_od1_camp_smoke',
+                coords = vector3(1288.5512695312, -1317.103881836, 75.760139465332),
+                rotation = vector3(-90.0, 0.0, 0.0),
+                scale = 7.0,
+            },
+            {
+                asset = 'scr_std1',
+                effect = 'scr_nbd1_smoke_02',
+                coords = vector3(1288.5512695312, -1317.103881836, 74.760139465332),
+                rotation = vector3(90.0, 90.0, 90.0),
+                scale = 1.0,
+            },
+            {
+                asset = 'scr_net_moon5',
+                effect = 'scr_net_moon5_player_smoke',
+                coords = vector3(1288.5512695312, -1317.103881836, 72.760139465332),
+                rotation = vector3(0.0, 0.0, 0.0),
+                scale = 5.0,
+            },
+        })
+    end
+end
+
+local function applySaintDenisVaultSealed()
+    local id = 'saint_denis_bank_wall'
+    if State.breachedVaultWalls[id] then return end
+
+    if State.vaultBreachObjects[id] and State.vaultBreachObjects[id].wall and DoesEntityExist(State.vaultBreachObjects[id].wall) then
+        return
+    end
+
+    cleanupVaultBreachObjects(id)
+
+    pcall(function() RemoveImap(-1026473536) end)
+    pcall(function() RequestImap(1017355491) end)
+    pcall(function() RequestImap(-604091710) end)
+
+    local wall = createObject('s_combankwall_b4', vector3(2653.2529296875, -1291.990966796875, 51.24435424804687), false)
+    if wall then
+        SetEntityRotation(wall, 0.0, 0.0, 0.0, 2, true)
+        SetEntityCoords(wall, 2653.2529296875, -1291.990966796875, 51.24435424804687, false, false, false, false)
+        FreezeEntityPosition(wall, true)
+        SetEntityAsMissionEntity(wall, true, true)
+    end
+
+    State.vaultBreachObjects[id] = { wall = wall }
+end
+
+local function applySaintDenisVaultBreached(playFx)
+    local id = 'saint_denis_bank_wall'
+    cleanupVaultBreachObjects(id)
+
+    pcall(function() RemoveImap(-1026473536) end)
+    pcall(function() RemoveImap(1017355491) end)
+
+    local wall = createObject('s_combankwall_after', vector3(2653.2529296875, -1291.990966796875, 51.24435424804687), false)
+    local debris = createObject('des_nbd1_bankwall_int_end', vector3(2651.3271484375, -1292.99365234375, 49.35), false)
+
+    if wall then
+        SetEntityRotation(wall, 0.0, 0.0, 0.0, 2, true)
+        SetEntityCoords(wall, 2653.2529296875, -1291.990966796875, 51.24435424804687, false, false, false, false)
+        FreezeEntityPosition(wall, true)
+        SetEntityAsMissionEntity(wall, true, true)
+    end
+
+    if debris then
+        SetEntityRotation(debris, 0.0, 0.0, 0.0, 2, true)
+        SetEntityCoords(debris, 2651.3271484375, -1292.99365234375, 54.23934555053711, false, false, false, false)
+        FreezeEntityPosition(debris, true)
+        SetEntityAsMissionEntity(debris, true, true)
+    end
+
+    State.vaultBreachObjects[id] = { wall = wall, debris = debris }
+
+    if playFx then
+        AddExplosion(2653.995361328125, -1292.08447265625, 51.49860382080078, (Config.VaultBreaches and Config.VaultBreaches.explosionType) or 25, (Config.VaultBreaches and Config.VaultBreaches.explosionDamageScale) or 5.0, true, false, 0)
+        runVaultBreachSmoke(id, {
+            {
+                asset = 'scr_odr1',
+                effect = 'scr_od1_camp_smoke',
+                coords = vector3(2653.62939453125, -1291.9482421875, 51.95564270019531),
+                rotation = vector3(-90.0, 0.0, 0.0),
+                scale = 7.0,
+            },
+            {
+                asset = 'scr_std1',
+                effect = 'scr_nbd1_smoke_02',
+                coords = vector3(2653.62939453125, -1291.9482421875, 50.95564270019531),
+                rotation = vector3(90.0, 90.0, 90.0),
+                scale = 1.0,
+            },
+            {
+                asset = 'scr_net_moon5',
+                effect = 'scr_net_moon5_player_smoke',
+                coords = vector3(2653.62939453125, -1291.9482421875, 51.95564270019531),
+                rotation = vector3(0.0, 0.0, 0.0),
+                scale = 5.0,
+            },
+        })
+    end
+end
+
+local function applyVaultBreachState(id, playFx)
+    local bank = getVaultBreachConfig(id)
+    if not bank then return end
+
+    if bank.type == 'rhodes' then
+        applyRhodesVaultBreached(playFx)
+    elseif bank.type == 'saintdenis' then
+        applySaintDenisVaultBreached(playFx)
+    end
+end
+
+local function ensureVaultBreachStateReapplyThread()
+    if State.vaultBreachReapplyThread then return end
+    State.vaultBreachReapplyThread = true
+
+    CreateThread(function()
+        local lastNearRhodes = false
+        local lastInterior = 0
+        local lastPeriodic = 0
+        local target = vector3(1289.2504882812, -1316.3029785156, 76.542404174804)
+
+        while true do
+            Wait(1000)
+
+            if State.breachedVaultWalls and State.breachedVaultWalls.rhodes_bank_wall then
+                local ped = PlayerPedId()
+                local coords = GetEntityCoords(ped)
+                local nearRhodes = vdist(coords, target) <= 90.0
+                local interior = 0
+
+                pcall(function()
+                    interior = GetInteriorFromEntity(ped) or 0
+                end)
+
+                if nearRhodes and (not lastNearRhodes or interior ~= lastInterior) then
+                    applyRhodesVaultBreached(false, true)
+                    lastPeriodic = GetGameTimer()
+                elseif nearRhodes and (GetGameTimer() - lastPeriodic) > 30000 then
+
+                    applyRhodesVaultBreached(false, true)
+                    lastPeriodic = GetGameTimer()
+                end
+
+                lastNearRhodes = nearRhodes
+                lastInterior = interior
+            end
+        end
+    end)
+end
+
+RegisterNetEvent('awz_detonator:client:syncVaultBreaches', function(destroyed)
+    State.breachedVaultWalls = destroyed or {}
+
+    if State.breachedVaultWalls.rhodes_bank_wall then
+        applyRhodesVaultBreached(false)
+        ensureVaultBreachStateReapplyThread()
+    end
+
+    if State.breachedVaultWalls.saint_denis_bank_wall then
+        applySaintDenisVaultBreached(false)
+    else
+        applySaintDenisVaultSealed()
+    end
+end)
+
+RegisterNetEvent('awz_detonator:client:vaultBreach', function(id)
+    if not id then return end
+    State.breachedVaultWalls[id] = true
+    applyVaultBreachState(id, true)
+    if id == 'rhodes_bank_wall' then
+        ensureVaultBreachStateReapplyThread()
+    end
+end)
+
+local function getDestructiblePropCoords(entry)
     if not entry or not entry.coords then return nil end
 
-    local cfg = Config.BlastProps or {}
+    local cfg = Config.DestructibleProps or {}
     local zOffset = tonumber(cfg.zOffset)
     if zOffset == nil then zOffset = -1.0 end
 
@@ -444,20 +979,20 @@ local function getBlastPropCoords(entry)
     }
 end
 
-local function deleteBlastProp(id)
-    local ent = State.blastProps[id]
+local function deleteDestructibleProp(id)
+    local ent = State.destructibleProps[id]
     if ent and ent ~= 0 and DoesEntityExist(ent) then
         SetEntityAsMissionEntity(ent, true, true)
         DeleteEntity(ent)
     end
-    State.blastProps[id] = nil
+    State.destructibleProps[id] = nil
 end
 
-local function spawnBlastProp(entry)
-    if not entry or not entry.id or State.blastProps[entry.id] then return end
-    if State.blastDestroyed[entry.id] then return end
+local function spawnDestructibleProp(entry)
+    if not entry or not entry.id or State.destructibleProps[entry.id] then return end
+    if State.destructibleDestroyed[entry.id] then return end
 
-    local c = getBlastPropCoords(entry)
+    local c = getDestructiblePropCoords(entry)
     if not c then return end
 
     local obj = createObject(entry.model, vector3(c.x, c.y, c.z), false)
@@ -470,11 +1005,11 @@ local function spawnBlastProp(entry)
     FreezeEntityPosition(obj, true)
     SetEntityInvincible(obj, true)
     SetEntityAsMissionEntity(obj, true, true)
-    State.blastProps[entry.id] = obj
+    State.destructibleProps[entry.id] = obj
 end
 
-local function refreshBlastProps()
-    local cfg = Config.BlastProps
+local function refreshDestructibleProps()
+    local cfg = Config.DestructibleProps
     if not (cfg and cfg.enabled and type(cfg.list) == 'table') then return end
 
     local ped = PlayerPedId()
@@ -483,16 +1018,16 @@ local function refreshBlastProps()
 
     for _, entry in ipairs(cfg.list) do
         if entry.id then
-            if State.blastDestroyed[entry.id] then
-                deleteBlastProp(entry.id)
+            if State.destructibleDestroyed[entry.id] then
+                deleteDestructibleProp(entry.id)
             else
-                local c = getBlastPropCoords(entry)
+                local c = getDestructiblePropCoords(entry)
                 if c then
                     local dist = vdist(pcoords, vector3(c.x, c.y, c.z))
                     if dist <= spawnDistance then
-                        spawnBlastProp(entry)
+                        spawnDestructibleProp(entry)
                     else
-                        deleteBlastProp(entry.id)
+                        deleteDestructibleProp(entry.id)
                     end
                 end
             end
@@ -500,28 +1035,28 @@ local function refreshBlastProps()
     end
 end
 
-RegisterNetEvent('awz_detonator:client:syncBlastProps', function(destroyed)
-    State.blastDestroyed = destroyed or {}
-    refreshBlastProps()
+RegisterNetEvent('awz_detonator:client:syncDestructibleProps', function(destroyed)
+    State.destructibleDestroyed = destroyed or {}
+    refreshDestructibleProps()
 end)
 
-RegisterNetEvent('awz_detonator:client:destroyBlastProp', function(id)
+RegisterNetEvent('awz_detonator:client:destroyDestructibleProp', function(id)
     if not id then return end
-    State.blastDestroyed[id] = true
-    deleteBlastProp(id)
+    State.destructibleDestroyed[id] = true
+    deleteDestructibleProp(id)
 end)
 
 CreateThread(function()
     Wait(2000)
-    TriggerServerEvent('awz_detonator:server:requestBlastProps')
-    TriggerServerEvent('awz_detonator:server:requestBacchusBridge')
+    TriggerServerEvent('awz_detonator:server:requestDestructibleProps')
+    TriggerServerEvent('awz_detonator:server:requestRailBridgeCollapse')
+    TriggerServerEvent('awz_detonator:server:requestVaultBreaches')
 
     while true do
         Wait(2000)
-        refreshBlastProps()
+        refreshDestructibleProps()
     end
 end)
-
 
 local function choosePlacementLoop()
     State.stage = 'choose'
@@ -532,16 +1067,14 @@ local function choosePlacementLoop()
         showPromptGroup(Config.Language.chooseTitle)
         setPrompt(State.prompts.use, true, true, Config.Language.chooseGround)
         setPrompt(State.prompts.ground, false, false)
-        setPrompt(State.prompts.cancel, true, true, Config.Language.cancel)
+
+        setPrompt(State.prompts.cancel, false, false, Config.Language.cancel)
 
         if promptPressed(State.prompts.use) then
             if placeDynamite(false) then
-                startFuseStage()
+                startWireStage()
                 return true
             end
-            refundAndStop(Config.Language.cancelled)
-            return false
-        elseif promptPressed(State.prompts.cancel) then
             refundAndStop(Config.Language.cancelled)
             return false
         end
@@ -550,13 +1083,14 @@ local function choosePlacementLoop()
     return false
 end
 
-local function fuseLoop()
+local function wireLoop()
     ensurePrompts()
     setPrompt(State.prompts.ground, false, false)
 
-    while State.active and State.stage == 'fuse' do
+    while State.active and State.stage == 'wire' do
         Wait(0)
         local ped = PlayerPedId()
+        blockWireRunControls(ped)
         local pcoords = GetEntityCoords(ped)
         local dcoords = GetEntityCoords(State.dynamite)
         local dist = vdist(pcoords, dcoords)
@@ -589,6 +1123,7 @@ local function detonatorLoop()
 
     while State.active and State.stage == 'detonator' do
         Wait(0)
+        blockWireRunControls(PlayerPedId())
         showPromptGroup(Config.Language.chooseTitle)
         setPrompt(State.prompts.use, true, true, Config.Language.detonate)
         setPrompt(State.prompts.cancel, true, State.allowCancel, Config.Language.cancel)
@@ -605,7 +1140,7 @@ local function detonatorLoop()
     return false
 end
 
-local function runDynamite(allowCancel)
+local function runDetonatorPlacement(allowCancel)
     if State.active then
         notify(Config.Language.busy)
         return false
@@ -616,27 +1151,29 @@ local function runDynamite(allowCancel)
 
     CreateThread(function()
         local ok = choosePlacementLoop()
-        if ok then ok = fuseLoop() end
+        if ok then ok = wireLoop() end
         if ok then detonatorLoop() end
     end)
 
     return true
 end
 
-RegisterNetEvent('awz_dynamite:client:start', function(allowCancel)
-    runDynamite(allowCancel)
-end)
+local function handleStartDetonatorPlacement(allowCancel)
+    runDetonatorPlacement(allowCancel)
+end
 
-DYNAMITE = DYNAMITE or {}
-function DYNAMITE.Start(standing, allowCancel)
+RegisterNetEvent('awz_detonator:client:start', handleStartDetonatorPlacement)
+
+AWZ_DETONATOR = AWZ_DETONATOR or {}
+function AWZ_DETONATOR.Start(standing, allowCancel)
     if State.active then return false end
     State.active = true
     State.allowCancel = allowCancel ~= false
 
     CreateThread(function()
         if placeDynamite(standing and true or false) then
-            startFuseStage()
-            if fuseLoop() then
+            startWireStage()
+            if wireLoop() then
                 detonatorLoop()
             end
         else
@@ -647,31 +1184,31 @@ function DYNAMITE.Start(standing, allowCancel)
     return true
 end
 
-function DYNAMITE.Stop()
+function AWZ_DETONATOR.Stop()
     cleanup(false)
 end
 
-function DYNAMITE.IsInDynamite()
+function AWZ_DETONATOR.IsActive()
     return State.active
 end
 
-function DYNAMITE.IsInFuses()
-    return State.stage == 'fuse'
+function AWZ_DETONATOR.IsInWires()
+    return State.stage == 'wire'
 end
 
-function DYNAMITE.IsInDetonator()
+function AWZ_DETONATOR.IsInDetonator()
     return State.stage == 'detonator'
 end
 
-exports('DYNAMITE', function()
-    return DYNAMITE
+exports('AWZ_DETONATOR', function()
+    return AWZ_DETONATOR
 end)
 
 if Config.Command then
     RegisterCommand(Config.Command, function()
-        -- Direct client fallback for local tests without inventory removal.
+
         if Config.DevMode then
-            runDynamite(false)
+            runDetonatorPlacement(false)
         else
             notify('Comando dev disattivato. Usa item: ' .. Config.UseItem)
         end
@@ -681,8 +1218,10 @@ end
 AddEventHandler('onResourceStop', function(res)
     if res ~= RESOURCE then return end
     cleanup(false)
-    for id in pairs(State.blastProps) do
-        deleteBlastProp(id)
+    for id in pairs(State.destructibleProps) do
+        deleteDestructibleProp(id)
     end
-    deleteBacchusGhostTrain()
+    deleteRailBlockerTrain()
+    for id in pairs(State.vaultBreachFx or {}) do stopVaultBreachFx(id) end
+    for id in pairs(State.vaultBreachObjects or {}) do cleanupVaultBreachObjects(id) end
 end)

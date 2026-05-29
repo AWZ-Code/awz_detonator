@@ -4,11 +4,16 @@ rdr3_warning 'I acknowledge that this is a prerelease build of RedM, and I am aw
 
 lua54 'yes'
 author 'AWZ Code'
-description 'AWZ Dynamite - clean VORP RedM dynamite, fuse and detonator system'
-version '1.1.0'
+description 'AWZ Detonator - clean VORP RedM dynamite, fuse and detonator system'
+version '1.2.0'
 
 shared_scripts {
-    'config/config.lua'
+    'config/config.lua',
+    'locales/it.lua',
+    'locales/en.lua',
+    'locales/fr.lua',
+    'locales/de.lua',
+    'shared/locale.lua'
 }
 
 client_scripts {

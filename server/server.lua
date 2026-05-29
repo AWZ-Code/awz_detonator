@@ -1,9 +1,10 @@
 local RESOURCE = GetCurrentResourceName()
 local registeredUsable = false
 local ActiveUse = {}
-local BlastDestroyed = {}
+local DestructibleDestroyed = {}
 local BlastDbReady = false
-local BacchusBridgeDestroyed = false
+local RailBridgeCollapsed = false
+local BreachedVaultWalls = {}
 
 local function dbg(msg)
     if Config.DevMode then
@@ -18,24 +19,19 @@ local function notify(src, msg)
     local text = tostring(msg or ' ')
     if text == '' then text = ' ' end
 
-    -- IMPORTANT: do not also call awz_dynamite:client:notify after AWZ Bottom.
-    -- Calling both creates a duplicate ShowBottom call, and RedM can throw a
-    -- CreateVarString native exception inside awz_libs on the second call.
     if Config.Notify and Config.Notify.useAwzLibs and Config.Notify.awzEvent then
         TriggerClientEvent(Config.Notify.awzEvent, src, text, duration)
         return
     end
 
-    TriggerClientEvent('awz_dynamite:client:notify', src, text, duration)
+    TriggerClientEvent('awz_detonator:client:notify', src, text, duration)
 end
 
-
-
 local function getBlastTableName()
-    local name = Config.BlastProps and Config.BlastProps.databaseTable or 'awz_detonator_blast_props'
-    name = tostring(name or 'awz_detonator_blast_props')
+    local name = Config.DestructibleProps and Config.DestructibleProps.databaseTable or 'detonator_destructibles'
+    name = tostring(name or 'detonator_destructibles')
     if not name:match('^[%w_]+$') then
-        name = 'awz_detonator_blast_props'
+        name = 'detonator_destructibles'
     end
     return name
 end
@@ -110,11 +106,11 @@ local function dbExecute(query, params)
     return false
 end
 
-local function setupBlastProps()
-    local cfg = Config.BlastProps
+local function setupDestructibleProps()
+    local cfg = Config.DestructibleProps
     if not (cfg and cfg.enabled) then return end
 
-    BlastDestroyed = {}
+    DestructibleDestroyed = {}
     BlastDbReady = false
 
     local tableName = getBlastTableName()
@@ -137,12 +133,12 @@ local function setupBlastProps()
     local rows = dbQuerySync(('SELECT `prop_id` FROM `%s` WHERE `destroyed` = 1'):format(tableName), {}) or {}
     for _, row in ipairs(rows) do
         if row.prop_id then
-            BlastDestroyed[tostring(row.prop_id)] = true
+            DestructibleDestroyed[tostring(row.prop_id)] = true
         end
     end
 
     BlastDbReady = true
-    dbg(('loaded persistent destroyed blast props: %s'):format(json.encode(BlastDestroyed)))
+    dbg(('loaded persistent destroyed blast props: %s'):format(json.encode(DestructibleDestroyed)))
 end
 
 local function saveDestroyedBlastProp(id)
@@ -156,10 +152,10 @@ local function saveDestroyedBlastProp(id)
     return dbExecute(sql, { tostring(id) })
 end
 
-local function getBlastPropCoords(entry)
+local function getDestructiblePropCoords(entry)
     if not entry or not entry.coords then return nil end
 
-    local cfg = Config.BlastProps or {}
+    local cfg = Config.DestructibleProps or {}
     local zOffset = tonumber(cfg.zOffset)
     if zOffset == nil then zOffset = -1.0 end
 
@@ -180,55 +176,75 @@ local function distance3(a, b)
     return math.sqrt(dx * dx + dy * dy + dz * dz)
 end
 
-local function checkBlastProps(coords)
-    local cfg = Config.BlastProps
+local function checkDestructibleProps(coords)
+    local cfg = Config.DestructibleProps
     if not (cfg and cfg.enabled and type(cfg.list) == 'table') then return end
     if not coords then return end
 
     for _, entry in ipairs(cfg.list) do
         local id = entry.id
-        if id and not BlastDestroyed[id] then
-            local c = getBlastPropCoords(entry)
+        if id and not DestructibleDestroyed[id] then
+            local c = getDestructiblePropCoords(entry)
             local radius = tonumber(entry.radius or cfg.checkRadiusDefault) or 5.0
             if c and distance3(coords, c) <= radius then
-                BlastDestroyed[id] = true
+                DestructibleDestroyed[id] = true
 
                 if entry.persistent then
                     saveDestroyedBlastProp(id)
                 end
 
-                TriggerClientEvent('awz_detonator:client:destroyBlastProp', -1, id)
+                TriggerClientEvent('awz_detonator:client:destroyDestructibleProp', -1, id)
                 dbg(('blast prop destroyed: %s radius %.2f'):format(id, radius))
             end
         end
     end
 end
 
-
-
-local function checkBacchusBridge(coords)
-    local cfg = Config.BacchusBridge
-    if BacchusBridgeDestroyed then return end
+local function checkRailBridgeCollapse(coords)
+    local cfg = Config.RailBridgeCollapse
+    if RailBridgeCollapsed then return end
     if not (cfg and cfg.enabled and cfg.coords and coords) then return end
 
     local radius = tonumber(cfg.radius) or 50.0
     if distance3(coords, cfg.coords) <= radius then
-        BacchusBridgeDestroyed = true
-        TriggerClientEvent('awz_detonator:client:bacchusBridgeFall', -1)
-        dbg(('Bacchus bridge destroyed by dynamite inside %.2fm radius.'):format(radius))
+        RailBridgeCollapsed = true
+        TriggerClientEvent('awz_detonator:client:railBridgeCollapse', -1)
+        dbg(('Rail bridge collapsed by detonator charge inside %.2fm radius.'):format(radius))
     end
 end
 
-RegisterNetEvent('awz_detonator:server:requestBacchusBridge', function()
+local function checkVaultBreaches(coords)
+    local cfg = Config.VaultBreaches
+    if not (cfg and cfg.enabled and coords and type(cfg.banks) == 'table') then return end
+
+    for _, bank in ipairs(cfg.banks) do
+        local id = bank.id
+        if id and not BreachedVaultWalls[id] and bank.coords then
+            local radius = tonumber(bank.radius or cfg.radius) or 5.0
+            if distance3(coords, bank.coords) <= radius then
+                BreachedVaultWalls[id] = true
+                TriggerClientEvent('awz_detonator:client:vaultBreach', -1, id)
+                dbg(('vault breach triggered: %s radius %.2f'):format(id, radius))
+            end
+        end
+    end
+end
+
+RegisterNetEvent('awz_detonator:server:requestVaultBreaches', function()
     local src = source
-    if BacchusBridgeDestroyed then
-        TriggerClientEvent('awz_detonator:client:bacchusBridgeFall', src)
+    TriggerClientEvent('awz_detonator:client:syncVaultBreaches', src, BreachedVaultWalls)
+end)
+
+RegisterNetEvent('awz_detonator:server:requestRailBridgeCollapse', function()
+    local src = source
+    if RailBridgeCollapsed then
+        TriggerClientEvent('awz_detonator:client:railBridgeCollapse', src)
     end
 end)
 
-RegisterNetEvent('awz_detonator:server:requestBlastProps', function()
+RegisterNetEvent('awz_detonator:server:requestDestructibleProps', function()
     local src = source
-    TriggerClientEvent('awz_detonator:client:syncBlastProps', src, BlastDestroyed)
+    TriggerClientEvent('awz_detonator:client:syncDestructibleProps', src, DestructibleDestroyed)
 end)
 
 local function getVorpInventoryApi()
@@ -340,8 +356,8 @@ local function setItemMetadata(src, itemId, metadata, amount)
     return ok and ret ~= false
 end
 
-local function getDetonatorUses(item)
-    local cfg = Config.DetonatorUses or {}
+local function getDetonatorDurability(item)
+    local cfg = Config.DetonatorDurability or {}
     local key = cfg.metadataKey or 'uses'
     local defaultUses = tonumber(cfg.default) or 20
     local metadata = getItemMetadata(item)
@@ -354,18 +370,40 @@ local function getDetonatorUses(item)
     return uses, defaultUses, metadata, key
 end
 
+local function applyBrokenDetonatorMetadata(src, item, metadata, key)
+    local cfg = Config.DetonatorDurability or {}
+    local itemId = getItemId(item)
+    if not itemId then return false end
+
+    local newMetadata = copyTable(metadata)
+    newMetadata[key or cfg.metadataKey or 'uses'] = 0
+
+    if newMetadata.label == (cfg.brokenTooltip or 'Guasto') then
+        newMetadata.label = nil
+    end
+
+    if cfg.brokenDescription and cfg.brokenDescription ~= '' then
+        newMetadata.description = cfg.brokenDescription
+    end
+
+    newMetadata.tooltip = cfg.brokenTooltip or 'Guasto'
+
+    return setItemMetadata(src, itemId, newMetadata, 1)
+end
+
 local function findUsableDetonator(src)
     local item = getItem(src, Config.DetonatorItem)
     if not item then
         return nil, 'missing'
     end
 
-    if not (Config.DetonatorUses and Config.DetonatorUses.enabled) then
+    if not (Config.DetonatorDurability and Config.DetonatorDurability.enabled) then
         return item, nil
     end
 
-    local uses = getDetonatorUses(item)
+    local uses, defaultUses, metadata, key = getDetonatorDurability(item)
     if uses <= 0 then
+        applyBrokenDetonatorMetadata(src, item, metadata, key)
         return nil, 'empty'
     end
 
@@ -373,7 +411,7 @@ local function findUsableDetonator(src)
 end
 
 local function consumeDetonatorUse(src)
-    if not (Config.DetonatorUses and Config.DetonatorUses.enabled) then
+    if not (Config.DetonatorDurability and Config.DetonatorDurability.enabled) then
         return true
     end
 
@@ -383,21 +421,43 @@ local function consumeDetonatorUse(src)
     end
 
     local itemId = getItemId(item)
-    local uses, defaultUses, metadata, key = getDetonatorUses(item)
+    local uses, defaultUses, metadata, key = getDetonatorDurability(item)
     uses = math.max(0, uses - 1)
 
     local newMetadata = copyTable(metadata)
     newMetadata[key] = uses
 
-    if Config.DetonatorUses.showDescription then
-        newMetadata.description = (Config.Language.detonatorUses or 'Utilizzi detonatore: %s/%s'):format(uses, defaultUses)
+    if uses <= 0 then
+        if newMetadata.label == (Config.DetonatorDurability.brokenTooltip or 'Guasto') then
+            newMetadata.label = nil
+        end
+        if Config.DetonatorDurability.brokenDescription and Config.DetonatorDurability.brokenDescription ~= '' then
+            newMetadata.description = Config.DetonatorDurability.brokenDescription
+        elseif Config.DetonatorDurability.showDescription then
+            newMetadata.description = (Config.Language.detonatorUses or 'Utilizzi detonatore: %s/%s'):format(uses, defaultUses)
+        end
+        newMetadata.tooltip = Config.DetonatorDurability.brokenTooltip or 'Guasto'
+    else
+        if Config.DetonatorDurability.showDescription then
+            newMetadata.description = (Config.Language.detonatorUses or 'Utilizzi detonatore: %s/%s'):format(uses, defaultUses)
+        end
+        if newMetadata.tooltip == (Config.DetonatorDurability.brokenTooltip or 'Guasto') then
+            newMetadata.tooltip = nil
+        end
+        if newMetadata.label == (Config.DetonatorDurability.brokenTooltip or 'Guasto') then
+            newMetadata.label = nil
+        end
     end
 
     if not setItemMetadata(src, itemId, newMetadata, 1) then
         return false, 'metadata'
     end
 
-    notify(src, (Config.Language.detonatorUses or 'Utilizzi detonatore: %s/%s'):format(uses, defaultUses))
+    if uses <= 0 then
+        notify(src, Config.Language.detonatorEmpty or 'Il detonatore è guasto.')
+    else
+        notify(src, (Config.Language.detonatorUses or 'Utilizzi detonatore: %s/%s'):format(uses, defaultUses))
+    end
     return true
 end
 
@@ -426,14 +486,13 @@ local function registerUsableItem()
             return
         end
 
-        -- VORP calls this callback only when the item exists. We remove immediately and refund on cancel.
         if not removeItem(src, Config.UseItem, 1) then
             notify(src, Config.Language.noItem)
             return
         end
 
         ActiveUse[src] = true
-        TriggerClientEvent('awz_dynamite:client:start', src, true)
+        TriggerClientEvent('awz_detonator:client:start', src, true)
     end
 
     local ok = pcall(function()
@@ -450,7 +509,7 @@ local function registerUsableItem()
         ok = pcall(function() api.RegisterUsableItem(Config.UseItem, onUse) end)
         if ok then
             registeredUsable = true
-            dbg(('registered usable item through legacy API: %s'):format(Config.UseItem))
+            dbg(('registered usable item through fallback API: %s'):format(Config.UseItem))
             return
         end
     end
@@ -458,13 +517,16 @@ local function registerUsableItem()
     print(('^3[%s]^0 unable to register usable item with vorp_inventory. Command fallback remains available.'):format(RESOURCE))
 end
 
-RegisterNetEvent('awz_dynamite:server:refund', function()
-    local src = source
+local function handleRefund(src)
     if not ActiveUse[src] then return end
     ActiveUse[src] = nil
     if addItem(src, Config.UseItem, 1) then
         notify(src, Config.Language.refunded)
     end
+end
+
+RegisterNetEvent('awz_detonator:server:refund', function()
+    handleRefund(source)
 end)
 
 local function handleDetonate(src, coords)
@@ -474,7 +536,7 @@ local function handleDetonate(src, coords)
     if not consumed then
         ActiveUse[src] = nil
         addItem(src, Config.UseItem, 1)
-        TriggerClientEvent('awz_dynamite:client:stopPlacement', src)
+        TriggerClientEvent('awz_detonator:client:stopPlacement', src)
 
         if reason == 'empty' then
             notify(src, Config.Language.detonatorEmpty)
@@ -485,34 +547,15 @@ local function handleDetonate(src, coords)
     end
 
     ActiveUse[src] = nil
-    checkBlastProps(coords)
-    checkBacchusBridge(coords)
+    checkDestructibleProps(coords)
+    checkRailBridgeCollapse(coords)
+    checkVaultBreaches(coords)
     TriggerClientEvent('awz_detonator:client:worldExplosion', -1, coords, src)
-    TriggerClientEvent('awz_dynamite:client:doExplosion', src, coords)
+    TriggerClientEvent('awz_detonator:client:doExplosion', src, coords)
 
-    if not Config.EnableLogs then return end
-    local msg = ('**DYNAMITE EXPLODED**\nPlayer: %s\nPosition: %s'):format(src, json.encode(coords or {}))
-
-    local ok = pcall(function()
-        exports.JD_logsV3:createLog({
-            EmbedMessage = msg,
-            player_id = src,
-            channel = Config.LogChannel,
-            screenshot = false
-        })
-    end)
-
-    if not ok then
-        print(('[%s] %s'):format(RESOURCE, msg))
-    end
 end
 
-RegisterNetEvent('awz_dynamite:server:detonate', function(coords)
-    handleDetonate(source, coords)
-end)
-
--- Legacy compatibility: old client event now routes through the secured detonator use flow.
-RegisterNetEvent('awz_dynamite:server:explosionLog', function(coords)
+RegisterNetEvent('awz_detonator:server:detonate', function(coords)
     handleDetonate(source, coords)
 end)
 
@@ -523,7 +566,7 @@ end)
 AddEventHandler('onResourceStart', function(res)
     if res ~= RESOURCE then return end
     Wait(1500)
-    setupBlastProps()
+    setupDestructibleProps()
     registerUsableItem()
     print(('^2[%s]^0 started.'):format(RESOURCE))
 end)
