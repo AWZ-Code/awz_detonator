@@ -35,7 +35,7 @@ Config.Props = {
     standingDynamite = 'p_stickydymt_bundle',
     groundDynamite = 'p_dynamite04x',
     handDynamite = 'p_stickydymt_single',
-    spool = 'p_cs_wirespool01x',
+    spool = 'p_cs_fusespool01x',
     detonator = 'p_detonator01x',
 }
 
@@ -172,7 +172,7 @@ Config.VaultBreaches = {
 }
 
 Config.Notify = {
-    useAwzLibs = true,
+    useAwzLibs = false,
     awzEvent = 'awz_Notify:Bottom',
     awzExportResource = 'awz_libs',
     awzExport = 'ShowBottom',
